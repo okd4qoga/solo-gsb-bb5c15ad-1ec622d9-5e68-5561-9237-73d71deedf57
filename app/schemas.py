@@ -1,12 +1,49 @@
 """Pydantic 请求/响应模型。"""
 from datetime import datetime, timezone
+from typing import Annotated
 
+from fastapi import Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+# SQLite INTEGER 为有符号 64 位：事件序号、校准版本及游标整数等
+# 凡落库或参与 SQL 绑定的整数一律不得超过该上界，越界请求统一返回 422
+SQLITE_INTEGER_MAX = 2**63 - 1
+
+# 查询参数复用的整数取值说明（0 ~ 2^63-1）
+_INTEGER_RANGE_DOC = "取值范围 0 ~ 9223372036854775807（SQLite 有符号 64 位），越界返回 422"
+
+# 事件序号查询参数（非负且不超过 SQLite 有符号 64 位上界）
+SeqRangeQuery = Annotated[
+    int,
+    Query(
+        ge=0,
+        le=SQLITE_INTEGER_MAX,
+        json_schema_extra={"format": "int64"},
+        description=f"事件序号（含端点，非负整数）；{_INTEGER_RANGE_DOC}",
+    ),
+]
+
+# 校准版本号查询参数（非负且不超过 SQLite 有符号 64 位上界）
+CalibrationVersionQuery = Annotated[
+    int,
+    Query(
+        ge=0,
+        le=SQLITE_INTEGER_MAX,
+        json_schema_extra={"format": "int64"},
+        description=f"校准版本号；{_INTEGER_RANGE_DOC}",
+    ),
+]
 
 
 class EventIn(BaseModel):
     box_code: str = Field(..., min_length=1, max_length=64, description="周转箱箱号")
-    seq: int = Field(..., ge=0, description="该箱递增的事件序号，从 0 开始")
+    seq: int = Field(
+        ...,
+        ge=0,
+        le=SQLITE_INTEGER_MAX,
+        json_schema_extra={"format": "int64"},
+        description=f"该箱递增的事件序号，从 0 开始；{_INTEGER_RANGE_DOC}",
+    )
     temperature: float = Field(..., ge=-100, le=100, description="摄氏温度")
     event_time: datetime = Field(..., description="ISO 8601，建议带时区，如 2026-09-23T10:00:00+08:00")
 
@@ -317,7 +354,13 @@ class TemperatureMedianResult(BaseModel):
 
 
 class CalibrationAnchorIn(BaseModel):
-    seq: int = Field(..., ge=0, description="锚点序号（非负整数），列表内须严格递增")
+    seq: int = Field(
+        ...,
+        ge=0,
+        le=SQLITE_INTEGER_MAX,
+        json_schema_extra={"format": "int64"},
+        description=f"锚点序号（非负整数），列表内须严格递增；{_INTEGER_RANGE_DOC}",
+    )
     temp_offset: float = Field(
         ...,
         allow_inf_nan=False,
@@ -328,7 +371,14 @@ class CalibrationAnchorIn(BaseModel):
 class CalibrationIn(BaseModel):
     box_code: str = Field(..., min_length=1, max_length=64, description="周转箱箱号")
     version: int = Field(
-        ..., ge=0, description="校准版本号（非负整数，建议从 1 开始；同箱不同版本并存）"
+        ...,
+        ge=0,
+        le=SQLITE_INTEGER_MAX,
+        json_schema_extra={"format": "int64"},
+        description=(
+            "校准版本号（非负整数，建议从 1 开始；同箱不同版本并存）；"
+            f"{_INTEGER_RANGE_DOC}"
+        ),
     )
     anchors: list[CalibrationAnchorIn] = Field(
         ..., min_length=2, description="校准锚点列表，至少 2 个，序号严格递增"
@@ -475,8 +525,14 @@ class RetransmissionPreviewIn(BaseModel):
     boxes: list[RetransmissionBoxIn] = Field(
         ..., min_length=1, max_length=4, description="参与调度的箱号及权重，1~4 个且箱号互异"
     )
-    seq_from: int = Field(..., ge=0, description="共同序号区间起点（含，非负整数）")
-    seq_to: int = Field(..., ge=0, description="共同序号区间终点（含，非负整数）")
+    seq_from: int = Field(
+        ..., ge=0, le=SQLITE_INTEGER_MAX, json_schema_extra={"format": "int64"},
+        description=f"共同序号区间起点（含，非负整数）；{_INTEGER_RANGE_DOC}"
+    )
+    seq_to: int = Field(
+        ..., ge=0, le=SQLITE_INTEGER_MAX, json_schema_extra={"format": "int64"},
+        description=f"共同序号区间终点（含，非负整数）；{_INTEGER_RANGE_DOC}"
+    )
     max_command_length: int = Field(
         ..., ge=1, le=20, description="单条补报指令最多请求的连续序号个数（1~20）"
     )

@@ -188,6 +188,10 @@ def _decode_events_cursor(cursor: str, box_code: str) -> tuple[int, int]:
     格式错误（非 base64url/JSON、字段缺失或多出、类型或取值非法、版本不符）
     抛 422（invalid_cursor）；游标内箱号与路径箱号不一致（跨箱使用）
     抛 422（cursor_box_mismatch）。
+
+    水位与末尾 seq 均为参与 SQL 绑定的整数，除非负外还必须落在
+    SQLite 有符号 64 位范围内（0 ~ 2^63-1），否则续页查询会在绑定参数时
+    抛 OverflowError（500），故越界一律按游标格式错误返回 422。
     """
     try:
         raw = base64.b64decode(cursor.encode("ascii"), altchars=b"-_", validate=True)
@@ -200,15 +204,19 @@ def _decode_events_cursor(cursor: str, box_code: str) -> tuple[int, int]:
         # bool 是 int 子类，明确排除，避免 true/false 被当成序号或水位
         return isinstance(value, int) and not isinstance(value, bool)
 
+    # SQLite 有符号 64 位上界：游标整数参与 SQL 绑定，越界会在查询时
+    # 抛 OverflowError，这里在入口统一拒绝（422 invalid_cursor）
+    int64_max = schemas.SQLITE_INTEGER_MAX
+
     if (
         not isinstance(payload, dict)
         or set(payload) != {"v", "box_code", "watermark", "last_seq"}
         or payload["v"] != _EVENTS_CURSOR_VERSION
         or not isinstance(payload["box_code"], str)
         or not _is_int(payload["watermark"])
-        or payload["watermark"] < 0
+        or not 0 <= payload["watermark"] <= int64_max
         or not _is_int(payload["last_seq"])
-        or payload["last_seq"] < 0
+        or not 0 <= payload["last_seq"] <= int64_max
     ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

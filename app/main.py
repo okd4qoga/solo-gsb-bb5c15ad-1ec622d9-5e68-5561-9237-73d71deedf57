@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -82,6 +82,40 @@ async def handle_request_validation(request, exc: RequestValidationError) -> JSO
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content=jsonable_encoder({"detail": _json_safe(exc.errors())}),
     )
+
+
+def _normalize_integer_bounds(node):
+    """把 OpenAPI schema 中 integer 类型被序列化为 float 的边界还原为整数。
+
+    FastAPI 组装组件 schema 时，恰好为 2^63-1 的 maximum 会输出为浮点
+    9.223372036854776e18（该值是 double 对 2^63-1 的最近舍入，数值为 2^63），
+    JSON 文档里只是近似值。这里只把与 float(2^63-1) 精确相等的浮点边界
+    替换回整数常量 2^63-1，其余浮点整数用 int() 无损还原。
+    """
+    int64_max = schemas.SQLITE_INTEGER_MAX
+    if isinstance(node, dict):
+        if node.get("type") == "integer":
+            for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf"):
+                value = node.get(key)
+                if isinstance(value, float) and value.is_integer():
+                    node[key] = int64_max if value == float(int64_max) else int(value)
+        for value in node.values():
+            _normalize_integer_bounds(value)
+    elif isinstance(node, list):
+        for value in node:
+            _normalize_integer_bounds(value)
+    return node
+
+
+def _custom_openapi():
+    # 缓存由 FastAPI 在 app.openapi_schema 上管理；这里只在生成结果上归一化
+    if app.openapi_schema is None:
+        app.openapi_schema = _normalize_integer_bounds(app._default_openapi())
+    return app.openapi_schema
+
+
+app._default_openapi = app.openapi
+app.openapi = _custom_openapi
 
 
 @app.get("/health", tags=["system"], summary="健康检查")
@@ -261,8 +295,8 @@ def get_handoff_reconcile(
 def get_box_clock_audit(
     box_code: str,
     db: DbSession,
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    seq_from: schemas.SeqRangeQuery,
+    seq_to: schemas.SeqRangeQuery,
 ) -> list[schemas.ClockAuditItem]:
     if seq_from > seq_to:
         raise HTTPException(
@@ -289,8 +323,8 @@ def get_box_clock_audit(
 def get_box_heat_exposure(
     box_code: str,
     db: DbSession,
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    seq_from: schemas.SeqRangeQuery,
+    seq_to: schemas.SeqRangeQuery,
     upper_limit: Annotated[
         float, Query(allow_inf_nan=False, description="温度上限（℃），超过部分计入积分")
     ],
@@ -330,8 +364,8 @@ def get_box_heat_exposure(
 def get_box_temperature_median(
     box_code: str,
     db: DbSession,
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    seq_from: schemas.SeqRangeQuery,
+    seq_to: schemas.SeqRangeQuery,
     max_gap_seconds: Annotated[
         float,
         Query(
@@ -368,11 +402,9 @@ def get_box_temperature_median(
 def get_box_merkle_proof(
     box_code: str,
     db: DbSession,
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
-    target_seq: Annotated[
-        int, Query(ge=0, description="目标事件序号（须为区间内实际存在的事件）")
-    ],
+    seq_from: schemas.SeqRangeQuery,
+    seq_to: schemas.SeqRangeQuery,
+    target_seq: schemas.SeqRangeQuery,
 ) -> schemas.MerkleProofResult:
     if seq_from > seq_to:
         raise HTTPException(
@@ -399,8 +431,8 @@ def get_box_merkle_proof(
 def get_box_trajectory_compression(
     box_code: str,
     db: DbSession,
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    seq_from: schemas.SeqRangeQuery,
+    seq_to: schemas.SeqRangeQuery,
     max_error: Annotated[
         float,
         Query(
@@ -468,7 +500,19 @@ def post_calibration(
     response_model=schemas.CalibrationOut,
     summary="查询某箱某版本的不可变校准锚点列表",
 )
-def get_calibration(box_code: str, version: int, db: DbSession) -> schemas.CalibrationOut:
+def get_calibration(
+    box_code: str,
+    version: Annotated[
+        int,
+        Path(
+            ge=0,
+            le=schemas.SQLITE_INTEGER_MAX,
+            json_schema_extra={"format": "int64"},
+            description=f"校准版本号；{schemas._INTEGER_RANGE_DOC}",
+        ),
+    ],
+    db: DbSession,
+) -> schemas.CalibrationOut:
     result = services.get_calibration(db, box_code.strip(), version)
     if result is None:
         raise HTTPException(
@@ -492,9 +536,9 @@ def get_calibration(box_code: str, version: int, db: DbSession) -> schemas.Calib
 def get_box_calibration_trajectory(
     box_code: str,
     db: DbSession,
-    version: Annotated[int, Query(ge=0, description="校准版本号")],
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    version: schemas.CalibrationVersionQuery,
+    seq_from: schemas.SeqRangeQuery,
+    seq_to: schemas.SeqRangeQuery,
 ) -> schemas.CalibrationTrajectoryResult:
     if seq_from > seq_to:
         raise HTTPException(
@@ -530,10 +574,10 @@ def get_box_calibration_trajectory(
 def get_box_calibration_impact(
     box_code: str,
     db: DbSession,
-    from_version: Annotated[int, Query(ge=0, description="原校准版本号")],
-    to_version: Annotated[int, Query(ge=0, description="新校准版本号")],
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    from_version: schemas.CalibrationVersionQuery,
+    to_version: schemas.CalibrationVersionQuery,
+    seq_from: schemas.SeqRangeQuery,
+    seq_to: schemas.SeqRangeQuery,
     temp_lower: Annotated[
         float, Query(allow_inf_nan=False, description="温度下限（℃），恰等于算区间内")
     ],
@@ -592,8 +636,8 @@ def get_telemetry_outages(
             "box_codes=A&box_codes=B；自动按顺序去重，至少 1 个）",
         ),
     ],
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    seq_from: schemas.SeqRangeQuery,
+    seq_to: schemas.SeqRangeQuery,
     max_silence_seconds: Annotated[
         Decimal,
         Query(
