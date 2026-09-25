@@ -185,9 +185,9 @@ def _encode_events_cursor(box_code: str, watermark: int, last_seq: int) -> str:
 def _decode_events_cursor(cursor: str, box_code: str) -> tuple[int, int]:
     """解码并校验续页游标，返回 (读取水位, 上页末尾 seq)。
 
-    格式错误（非 base64url/JSON、字段缺失或多出、类型或取值非法、版本不符）
-    抛 422（invalid_cursor）；游标内箱号与路径箱号不一致（跨箱使用）
-    抛 422（cursor_box_mismatch）。
+    格式错误（非 base64url/JSON、字段缺失或多出、类型或取值非法、版本不符，
+    含水位/序号超出 SQLite 有符号 64 位整数范围）抛 422（invalid_cursor）；
+    游标内箱号与路径箱号不一致（跨箱使用）抛 422（cursor_box_mismatch）。
     """
     try:
         raw = base64.b64decode(cursor.encode("ascii"), altchars=b"-_", validate=True)
@@ -196,18 +196,24 @@ def _decode_events_cursor(cursor: str, box_code: str) -> tuple[int, int]:
         # binascii.Error / JSONDecodeError / Unicode*Error 均为 ValueError 子类
         payload = None
 
-    def _is_int(value) -> bool:
+    def _is_sqlite_int(value) -> bool:
         # bool 是 int 子类，明确排除，避免 true/false 被当成序号或水位
-        return isinstance(value, int) and not isinstance(value, bool)
+        return (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and schemas.SQLITE_INTEGER_MIN <= value <= schemas.SQLITE_INTEGER_MAX
+        )
 
     if (
         not isinstance(payload, dict)
         or set(payload) != {"v", "box_code", "watermark", "last_seq"}
         or payload["v"] != _EVENTS_CURSOR_VERSION
         or not isinstance(payload["box_code"], str)
-        or not _is_int(payload["watermark"])
+        # 游标整数会进入 SQL 绑定：先要求落在 SQLite 有符号 64 位范围内，
+        # 再要求业务上非负（水位与上页末尾 seq 均不可能为负）
+        or not _is_sqlite_int(payload["watermark"])
         or payload["watermark"] < 0
-        or not _is_int(payload["last_seq"])
+        or not _is_sqlite_int(payload["last_seq"])
         or payload["last_seq"] < 0
     ):
         raise HTTPException(

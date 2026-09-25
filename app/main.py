@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -14,6 +14,57 @@ from . import models, schemas, services
 from .database import Base, engine, get_db
 
 DbSession = Annotated[Session, Depends(get_db)]
+
+# 所有进入 SQL 查询的整数参数统一限定在 SQLite 有符号 64 位范围内，
+# 超出（如 9223372036854775808）在参数校验阶段返回 422，避免 sqlite3 绑定时 OverflowError
+SeqFromQuery = Annotated[
+    int,
+    Query(
+        ge=0,
+        le=schemas.SQLITE_INTEGER_MAX,
+        description=f"起始序号（含，0~{schemas.SQLITE_INTEGER_MAX}）",
+    ),
+]
+SeqToQuery = Annotated[
+    int,
+    Query(
+        ge=0,
+        le=schemas.SQLITE_INTEGER_MAX,
+        description=f"结束序号（含，0~{schemas.SQLITE_INTEGER_MAX}）",
+    ),
+]
+TargetSeqQuery = Annotated[
+    int,
+    Query(
+        ge=0,
+        le=schemas.SQLITE_INTEGER_MAX,
+        description="目标事件序号（须为区间内实际存在的事件）",
+    ),
+]
+CalibrationVersionQuery = Annotated[
+    int,
+    Query(
+        ge=0,
+        le=schemas.SQLITE_INTEGER_MAX,
+        description="校准版本号（非负整数）",
+    ),
+]
+CalibrationFromVersionQuery = Annotated[
+    int,
+    Query(
+        ge=0,
+        le=schemas.SQLITE_INTEGER_MAX,
+        description="原校准版本号",
+    ),
+]
+CalibrationToVersionQuery = Annotated[
+    int,
+    Query(
+        ge=0,
+        le=schemas.SQLITE_INTEGER_MAX,
+        description="新校准版本号",
+    ),
+]
 
 
 @asynccontextmanager
@@ -261,8 +312,8 @@ def get_handoff_reconcile(
 def get_box_clock_audit(
     box_code: str,
     db: DbSession,
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    seq_from: SeqFromQuery,
+    seq_to: SeqToQuery,
 ) -> list[schemas.ClockAuditItem]:
     if seq_from > seq_to:
         raise HTTPException(
@@ -289,8 +340,8 @@ def get_box_clock_audit(
 def get_box_heat_exposure(
     box_code: str,
     db: DbSession,
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    seq_from: SeqFromQuery,
+    seq_to: SeqToQuery,
     upper_limit: Annotated[
         float, Query(allow_inf_nan=False, description="温度上限（℃），超过部分计入积分")
     ],
@@ -330,8 +381,8 @@ def get_box_heat_exposure(
 def get_box_temperature_median(
     box_code: str,
     db: DbSession,
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    seq_from: SeqFromQuery,
+    seq_to: SeqToQuery,
     max_gap_seconds: Annotated[
         float,
         Query(
@@ -368,11 +419,9 @@ def get_box_temperature_median(
 def get_box_merkle_proof(
     box_code: str,
     db: DbSession,
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
-    target_seq: Annotated[
-        int, Query(ge=0, description="目标事件序号（须为区间内实际存在的事件）")
-    ],
+    seq_from: SeqFromQuery,
+    seq_to: SeqToQuery,
+    target_seq: TargetSeqQuery,
 ) -> schemas.MerkleProofResult:
     if seq_from > seq_to:
         raise HTTPException(
@@ -399,8 +448,8 @@ def get_box_merkle_proof(
 def get_box_trajectory_compression(
     box_code: str,
     db: DbSession,
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    seq_from: SeqFromQuery,
+    seq_to: SeqToQuery,
     max_error: Annotated[
         float,
         Query(
@@ -468,7 +517,18 @@ def post_calibration(
     response_model=schemas.CalibrationOut,
     summary="查询某箱某版本的不可变校准锚点列表",
 )
-def get_calibration(box_code: str, version: int, db: DbSession) -> schemas.CalibrationOut:
+def get_calibration(
+    box_code: str,
+    version: Annotated[
+        int,
+        Path(
+            ge=0,
+            le=schemas.SQLITE_INTEGER_MAX,
+            description="校准版本号（非负整数）",
+        ),
+    ],
+    db: DbSession,
+) -> schemas.CalibrationOut:
     result = services.get_calibration(db, box_code.strip(), version)
     if result is None:
         raise HTTPException(
@@ -492,9 +552,9 @@ def get_calibration(box_code: str, version: int, db: DbSession) -> schemas.Calib
 def get_box_calibration_trajectory(
     box_code: str,
     db: DbSession,
-    version: Annotated[int, Query(ge=0, description="校准版本号")],
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    version: CalibrationVersionQuery,
+    seq_from: SeqFromQuery,
+    seq_to: SeqToQuery,
 ) -> schemas.CalibrationTrajectoryResult:
     if seq_from > seq_to:
         raise HTTPException(
@@ -530,10 +590,10 @@ def get_box_calibration_trajectory(
 def get_box_calibration_impact(
     box_code: str,
     db: DbSession,
-    from_version: Annotated[int, Query(ge=0, description="原校准版本号")],
-    to_version: Annotated[int, Query(ge=0, description="新校准版本号")],
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    from_version: CalibrationFromVersionQuery,
+    to_version: CalibrationToVersionQuery,
+    seq_from: SeqFromQuery,
+    seq_to: SeqToQuery,
     temp_lower: Annotated[
         float, Query(allow_inf_nan=False, description="温度下限（℃），恰等于算区间内")
     ],
@@ -592,8 +652,8 @@ def get_telemetry_outages(
             "box_codes=A&box_codes=B；自动按顺序去重，至少 1 个）",
         ),
     ],
-    seq_from: Annotated[int, Query(ge=0, description="起始序号（含）")],
-    seq_to: Annotated[int, Query(ge=0, description="结束序号（含）")],
+    seq_from: SeqFromQuery,
+    seq_to: SeqToQuery,
     max_silence_seconds: Annotated[
         Decimal,
         Query(

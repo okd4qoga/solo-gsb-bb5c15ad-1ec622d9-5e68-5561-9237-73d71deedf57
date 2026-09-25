@@ -1,12 +1,27 @@
 """Pydantic 请求/响应模型。"""
 from datetime import datetime, timezone
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+# SQLite 以有符号 64 位整数存储 INTEGER，绑定超出该范围的 Python int 会让
+# sqlite3 抛 OverflowError。凡入库或参与 SQL 查询的整数（事件序号、校准版本、
+# 分页游标内整数）统一限定在该范围内，越界请求在参数校验阶段返回 422。
+SQLITE_INTEGER_MIN = -(2**63)
+SQLITE_INTEGER_MAX = 2**63 - 1
+
+# 业务语义非负（事件序号、校准版本、序号区间端点等）的整数：[0, 2^63-1]
+NonNegativeSQLiteInt = Annotated[
+    int,
+    Field(ge=0, le=SQLITE_INTEGER_MAX),
+]
 
 
 class EventIn(BaseModel):
     box_code: str = Field(..., min_length=1, max_length=64, description="周转箱箱号")
-    seq: int = Field(..., ge=0, description="该箱递增的事件序号，从 0 开始")
+    seq: NonNegativeSQLiteInt = Field(
+        ..., description="该箱递增的事件序号，从 0 开始；取值 0~9223372036854775807"
+    )
     temperature: float = Field(..., ge=-100, le=100, description="摄氏温度")
     event_time: datetime = Field(..., description="ISO 8601，建议带时区，如 2026-09-23T10:00:00+08:00")
 
@@ -317,7 +332,9 @@ class TemperatureMedianResult(BaseModel):
 
 
 class CalibrationAnchorIn(BaseModel):
-    seq: int = Field(..., ge=0, description="锚点序号（非负整数），列表内须严格递增")
+    seq: NonNegativeSQLiteInt = Field(
+        ..., description="锚点序号（0~9223372036854775807 的非负整数），列表内须严格递增"
+    )
     temp_offset: float = Field(
         ...,
         allow_inf_nan=False,
@@ -327,8 +344,9 @@ class CalibrationAnchorIn(BaseModel):
 
 class CalibrationIn(BaseModel):
     box_code: str = Field(..., min_length=1, max_length=64, description="周转箱箱号")
-    version: int = Field(
-        ..., ge=0, description="校准版本号（非负整数，建议从 1 开始；同箱不同版本并存）"
+    version: NonNegativeSQLiteInt = Field(
+        ...,
+        description="校准版本号（0~9223372036854775807 的非负整数，建议从 1 开始；同箱不同版本并存）",
     )
     anchors: list[CalibrationAnchorIn] = Field(
         ..., min_length=2, description="校准锚点列表，至少 2 个，序号严格递增"
@@ -475,8 +493,8 @@ class RetransmissionPreviewIn(BaseModel):
     boxes: list[RetransmissionBoxIn] = Field(
         ..., min_length=1, max_length=4, description="参与调度的箱号及权重，1~4 个且箱号互异"
     )
-    seq_from: int = Field(..., ge=0, description="共同序号区间起点（含，非负整数）")
-    seq_to: int = Field(..., ge=0, description="共同序号区间终点（含，非负整数）")
+    seq_from: NonNegativeSQLiteInt = Field(..., description="共同序号区间起点（含，非负整数）")
+    seq_to: NonNegativeSQLiteInt = Field(..., description="共同序号区间终点（含，非负整数）")
     max_command_length: int = Field(
         ..., ge=1, le=20, description="单条补报指令最多请求的连续序号个数（1~20）"
     )
